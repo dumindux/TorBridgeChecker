@@ -2,11 +2,13 @@
 # -*- coding: utf-8 -*-
 #
 # tor_bridgeckeck.py: script to check whether default tor bridges are active.
+# Copyright © 2012-2015 Jérémy Bobbio <lunar@debian.org>
 # Copyright © 2014-2015 Dumindu Buddhika <dumindukarunathilaka@gmail.com>
 #
-# Code to check whether a given bridge can be used to build a circuit is reused from original
-# code by Jérémy Bobbio <lunar@debian.org> with modifications . A link to the code
-# is here<https://anonscm.debian.org/cgit/users/lunar/check_tor.git/tree/check_tor.py>
+# Code to check a bridge is reused from original code by
+# Jérémy Bobbio <lunar@debian.org> with modifications.
+# A link to the code
+# <https://anonscm.debian.org/cgit/users/lunar/check_tor.git/tree/check_tor.py>
 #
 # This program is free software: you can redistribute it and/or modify
 # it under the terms of the GNU General Public License as published by
@@ -22,28 +24,17 @@
 # along with this program.  If not, see <http://www.gnu.org/licenses/>.
 
 DEBUG = False
-
+PREFERENCES_FILE = 'Browser/TorBrowser/Data/Browser/profile.default/' \
+                   'preferences/extension-overrides.js'
+CLIENT_TRANSPORT_PLUGINS_PATH = 'Browser/TorBrowser/Tor/' \
+                                'PluggableTransports/'
 
 import sys
-import os
-
-preferences_file='/Browser/TorBrowser/Data/Browser/profile.default/preferences/extension-overrides.js'
-
-
-OK = 0
-WARNING = 1
-CRITICAL = 2
-UNKNOWN = 3
-DEPENDENT = 4
-
 import errno
 import os
 import shutil
-import signal
 import tempfile
-import time
 import pycurl
-import random
 import re
 import stem
 import stem.connection
@@ -52,28 +43,19 @@ import stem.process
 import argparse
 
 
-#paths for each of the proxy client location
-TRANSPORT_CONFIG = {
-    'obfs2': {'ClientTransportPlugin': 'obfs2 exec /usr/bin/obfsproxy --managed'},
-    'obfs3': {'ClientTransportPlugin': 'obfs3 exec /usr/bin/obfs4proxy'},
-    'obfs4': {'ClientTransportPlugin': 'obfs4 exec /usr/bin/obfs4proxy'},
-    'fte': {'ClientTransportPlugin': 'fte exec /usr/bin//fteproxy.bin --managed'},
-    'scramblesuit':{'ClientTransportPlugin': 'scramblesuit exec /usr/bin/obfsproxy --managed' },
-    'flashproxy' : {'ClientTransportPlugin': 'flashproxy exec /usr/bin/flashproxy-client --register :0 :9000'},
-    'meek': {'ClientTransportPlugin': 'meek exec /usr/bin/meek-client'},
-}
-
 class IdentityMismatch(Exception):
-    RE = r'\[warn\] Tried connecting to router at \S+ but identity key was not as expected'
+    RE = r'\[warn\] Tried connecting to router at \S+ but identity key was' \
+         r' not as expected'
+
 
 class ClientTransportIssue(Exception):
-    RE = r'\[warn\] We were supposed to connect to bridge \S+ using pluggable transport'
+    RE = r'\[warn\] We were supposed to connect to bridge \S+ using ' \
+         r'pluggable transport'
 
-class UnableToBuildCircuit(Exception):
-    pass
 
 class UnableToDetermineSOCKSPort(Exception):
     pass
+
 
 class Tor(object):
     def __init__(self, extra_config, datadir=None, completion_percent=100):
@@ -88,7 +70,6 @@ class Tor(object):
 
     def __enter__(self):
 
-
         if not self.datadir:
             self.datadir_is_temp = True
             self.datadir = tempfile.mkdtemp()
@@ -100,20 +81,22 @@ class Tor(object):
             'SocksPort': 'auto',
             })
 
-
         self.popen = stem.process.launch_tor_with_config(
             config=config,
             completion_percent=self.completion_percent,
             init_msg_handler=self.handle_init_msg,
             take_ownership=True)
 
-        self.controller = stem.control.Controller.from_socket_file(self.control_socket_path())
+        self.controller = stem.control.Controller.from_socket_file(
+            self.control_socket_path())
         self.controller.authenticate()
 
         try:
-            self.socks_addr = self.controller.get_info('net/listeners/socks')[1:-1] # skip " at begining and end
+            self.socks_addr = self.controller.get_info(
+                'net/listeners/socks')[1:-1]  # skip " at begining and end
         except stem.ControllerError, exc:
-            raise UnableToDetermineSOCKSPort("Unable to determine Tor SOCKS port")
+            raise UnableToDetermineSOCKSPort(
+                "Unable to determine Tor SOCKS port")
 
         # We want nicknames in circuit events
         self.controller.enable_feature("VERBOSE_NAMES")
@@ -151,6 +134,7 @@ class Tor(object):
     def control_socket_path(self):
         return os.path.join(self.datadir, 'control')
 
+
 # abstract test class
 class ConnectivityTest(object):
     def __init__(self, datadir=None):
@@ -163,19 +147,11 @@ class ConnectivityTest(object):
         print "pycurl(%d): %s" % (debug_type, debug_msg)
 
     def get_url(self, socks_addr, url):
-        socks_host, socks_port = socks_addr.split(':')
         c = pycurl.Curl()
         c.setopt(pycurl.URL, url)
-        c.setopt(pycurl.PROXY, socks_host)
-        c.setopt(pycurl.PROXYPORT, int(socks_port))
-        # XXX: if pycurl was up to date, we should use something like this:
-        #c.setopt(pycurl.PROXY, 'socks5h://%s' % socks_addr)
-        # XXX: but we need to use the following 2, which leaks.
-        # it should at least be PROXY_SOCKS5_HOSTNAME instead
-        c.setopt(pycurl.PROXYTYPE, pycurl.PROXYTYPE_SOCKS5)
+        c.setopt(pycurl.PROXY, 'socks5h://%s' % socks_addr)
         c.setopt(pycurl.IPRESOLVE, pycurl.IPRESOLVE_V4)
         c.setopt(pycurl.WRITEFUNCTION, self.write_url_content)
-
 
         if DEBUG:
             c.setopt(pycurl.VERBOSE, 1)
@@ -183,13 +159,14 @@ class ConnectivityTest(object):
         c.perform()
         return self._url_content
 
+
 class BridgeTest(ConnectivityTest):
-    def __init__(self, transport,bridge_conf='', datadir=None):
+    def __init__(self, transport, bridge_conf='', datadir=None):
         super(BridgeTest, self).__init__()
         self.datadir = datadir
-        self.bridge_conf=bridge_conf
+        self.bridge_conf = bridge_conf
         self.nickname = None
-        self.transport=transport
+        self.transport = transport
 
     def handle_circ(self, event):
         if DEBUG:
@@ -199,41 +176,49 @@ class BridgeTest(ConnectivityTest):
         if event.status == stem.CircStatus.EXTENDED:
             self.nickname = event.path[0][1]
 
-    def run(self):
+    def run(self, transport_config):
 
-        config = { 'UseBridges': '1',
-                   'Bridge': self.bridge_conf,
-                   }
+        config = {
+            'UseBridges': '1',
+            'Bridge': self.bridge_conf,
+            }
 
-        config.update(TRANSPORT_CONFIG.get(self.transport, {}))
+        config.update(transport_config.get(self.transport, {}))
 
         with Tor(config, self.datadir) as tor:
             print 'Tor instance created'
-            tor.controller.add_event_listener(self.handle_circ, stem.control.EventType.CIRC)
+            tor.controller.add_event_listener(
+                self.handle_circ, stem.control.EventType.CIRC)
 
-            url_content = self.get_url(tor.socks_addr, 'https://www.torproject.org/')
+            url_content = self.get_url(
+                tor.socks_addr, 'https://www.torproject.org/')
             if 'Tor Project: Anonymity Online' not in url_content:
-                print 'WARNING: unexpected URL content using bridge %s' % (self.nickname)
+                print 'Unexpected URL content using bridge %s' % (self.nickname)
                 return
 
-            print 'OK: successfully built a circuit using bridge %s' % (self.nickname)
+            print 'Successfully built a circuit using bridge ' \
+                  '%s' % (self.nickname)
 
 
 def obtain_bridges(file):
 
-    bridge_lines=list()
+    bridge_lines = list()
 
     for line in file:
         if 'extensions.torlauncher.default_bridge.' in line:
-            linesegments=line.split("\"")
+            linesegments = line.split("\"")
             bridge_lines.append(linesegments[3].strip())
 
     return bridge_lines
 
-def generate_report(bridges,results,path):
-    file=open(path+"/report.html","w")
 
-    file.write("""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
+def generate_report(bridges, results, path):
+    if path is None:
+        path = ""
+
+    report_file = open(os.path.join(path, "report.html"), "w")
+
+    report_file.write("""<!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01 Transitional//EN"
         "http://www.w3.org/TR/html4/loose.dtd">
         <html>
         <head>
@@ -251,7 +236,7 @@ def generate_report(bridges,results,path):
         </head>
         <body>
         """)
-    file.write("""<table style="width:100%">
+    report_file.write("""<table style="width:100%">
           <caption>Status of the bridges</caption>
           <tr>
             <th>Bridge</th>
@@ -261,28 +246,48 @@ def generate_report(bridges,results,path):
 
     for bridge in bridges:
 
-        file.write("""
+        report_file.write("""
         <tr>
-                <td>"""+bridge+"""</td>
-                <td>"""+results[bridge]+ """</td>
+                <td>""" + bridge + """</td>
+                <td>""" + results[bridge] + """</td>
               </tr>
         """)
 
-    file.write("""
+    report_file.write("""
         </table>
 
     """)
-    file.write("""
+    report_file.write("""
         </body>
         </html>""")
-    file.close()
+    report_file.close()
+
+    print "Report created."
+
 
 def make_parser():
     parser = argparse.ArgumentParser()
-    parser.add_argument("tbbpath",
-                        help="Path to the tor browser bundle")
-    parser.add_argument("--rpath",help="Path to the generated report")
+    parser.add_argument("tbpath",
+                        help="Path to the Tor Browser binary")
+    parser.add_argument("--report", help="Path to the generated report")
     return parser
+
+
+def get_transport_config(tbpath):
+
+    # paths for each of the proxy client location
+    transport_configs = {
+        'obfs2': {'ClientTransportPlugin': 'obfs2 exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'obfsproxy.bin --managed'},
+        'obfs3': {'ClientTransportPlugin': 'obfs3 exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'obfsproxy.bin --managed'},
+        'obfs4': {'ClientTransportPlugin': 'obfs4 exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'obfs4proxy'},
+        'fte': {'ClientTransportPlugin': 'fte exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'fteproxy.bin --managed'},
+        'scramblesuit': {'ClientTransportPlugin': 'scramblesuit exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'obfsproxy.bin --managed'},
+        'flashproxy': {'ClientTransportPlugin': 'flashproxy exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'flashproxy-client --register :0 :8888'},
+        'meek': {'ClientTransportPlugin': 'meek exec ' + os.path.join(tbpath, CLIENT_TRANSPORT_PLUGINS_PATH) + 'meek-client'},
+        }
+
+    return transport_configs
+
 
 def main():
     parser = make_parser()
@@ -290,38 +295,40 @@ def main():
 
     default_bridge_file = None
     try:
-        default_bridge_file=open(args.tbbpath+preferences_file,'Ur')
+        default_bridge_file = open(os.path.join(args.tbpath, PREFERENCES_FILE), 'Ur')
     except:
-        print 'Preferences file not found. Please set the tor browser bundle location correctly.'
-        sys.exit(UNKNOWN)
+        print 'Preferences file not found. Please set the Tor Browser binary ' \
+              'location correctly.'
+        sys.exit(1)
 
-
-    bridges=obtain_bridges(default_bridge_file)  #list of default  bridges
-    results=dict()
+    bridges = obtain_bridges(default_bridge_file)  # list of default  bridges
+    results = dict()
 
     for bridge_line in bridges:
 
-        test = BridgeTest(bridge_line.split()[0],bridge_line.strip())
+        test = BridgeTest(bridge_line.split()[0], bridge_line.strip())
 
-        print 'Checking Bridge: '+bridge_line
+        print 'Checking Bridge: ' + bridge_line
 
         try:
-            test.run()
-            results[bridge_line]="live"
+            transport_config = get_transport_config(args.tbpath)
+            test.run(transport_config)
+            results[bridge_line] = "live"
         except UnableToDetermineSOCKSPort, ex:
-            print 'UNKNOWN: %s' % ex
-            sys.exit(UNKNOWN)
+            print '%s' % ex
+            sys.exit(1)
         except Exception, ex:
-            if str(ex).strip() == "Process terminated: Bridge line did not parse. See logs for details.":
-                print 'UNKNOWN: %s' % ex
+            if str(ex).strip() == "Process terminated: Bridge line did not parse. " \
+                                  "See logs for details.":
+                print '%s' % ex
                 print 'Bridge line format in the preferences file is incorrect.'
-                sys.exit(UNKNOWN)
-            results[bridge_line]="connection timed out"
-            print 'CRITICAL: %s' % ex
+                sys.exit(1)
+            results[bridge_line] = "Connection timed out"
+            print '%s' % ex
 
         print ''
 
-    generate_report(bridges,results,args.rpath)
+    generate_report(bridges, results, args.report)
 
 if __name__ == '__main__':
     main()
